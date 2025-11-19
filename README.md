@@ -159,6 +159,42 @@ This will disable the following tools:
 
 By default, all the tools will be available.
 
+## OAuth Authentication
+
+The MCP server supports OAuth 2.0 authentication via ArgoCD's Dex SSO. This allows users to authenticate using identity providers like Keycloak, Google, Okta, and more.
+
+### Setting up OAuth
+
+1. Register the MCP server as an OAuth client in ArgoCD (see [docs/OAUTH-SETUP.md](docs/OAUTH-SETUP.md))
+2. Configure environment variables:
+   ```bash
+   ARGOCD_BASE_URL=https://argocd.example.com
+   OAUTH_CLIENT_ID=mcp-server
+   OAUTH_CLIENT_SECRET=<secret-from-argocd>
+   MCP_BASE_URL=http://localhost:3000
+   ```
+3. Start the MCP server
+4. Navigate to `/oauth/authorize` to initiate OAuth flow
+
+### Authentication Methods
+
+The MCP server supports multiple authentication methods:
+
+1. **OAuth Bearer Token** (Recommended for users)
+   - Authenticate via `/oauth/authorize` endpoint
+   - Token included in `Authorization: Bearer <token>` header
+
+2. **API Token Header** (Good for services)
+   - Provide token in `x-argocd-api-token` header
+
+3. **Environment Variable** (Fallback)
+   - Set `ARGOCD_API_TOKEN` environment variable
+
+For detailed OAuth setup and testing instructions, see:
+- [OAuth Setup Guide](docs/OAUTH-SETUP.md)
+- [OAuth Testing Guide](docs/TESTING-OAUTH.md)
+- [OAuth Documentation](docs/OAUTH-README.md)
+
 ## For Development
 
 1. Clone the repository:

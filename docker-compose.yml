@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  mcp-server:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - ARGOCD_BASE_URL=${ARGOCD_BASE_URL:-https://argocd.example.com}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-mcp-server}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+      - MCP_BASE_URL=${MCP_BASE_URL:-http://localhost:3000}
+      - ARGOCD_API_TOKEN=${ARGOCD_API_TOKEN}
+      - NODE_TLS_REJECT_UNAUTHORIZED=${NODE_TLS_REJECT_UNAUTHORIZED:-0}
+
+
+
+

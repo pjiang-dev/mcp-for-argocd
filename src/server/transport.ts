@@ -6,6 +6,8 @@ import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { ProxyOAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/providers/proxyProvider.js';
+import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 
 export const connectStdioTransport = () => {
   const server = createServer({
@@ -53,6 +55,96 @@ export const connectHttpTransport = (port: number) => {
   const app = express();
   app.use(express.json());
 
+  // OAuth Configuration
+  const argocdUrl = process.env.ARGOCD_BASE_URL || '';
+  const oauthClientId = process.env.OAUTH_CLIENT_ID || 'mcp-server';
+  const oauthClientSecret = process.env.OAUTH_CLIENT_SECRET || '';
+  const mcpBaseUrl = process.env.MCP_BASE_URL || `http://localhost:${port}`;
+
+  // Only set up OAuth if we have the required configuration
+  if (argocdUrl && oauthClientId && oauthClientSecret) {
+    // Create OAuth provider for ArgoCD
+    const oauthProvider = new ProxyOAuthServerProvider({
+      endpoints: {
+        authorizationUrl: `${argocdUrl}/api/dex/auth`,
+        tokenUrl: `${argocdUrl}/api/dex/token`,
+        revocationUrl: `${argocdUrl}/api/dex/revoke`
+      },
+      verifyAccessToken: async (token) => {
+        // Verify token with ArgoCD
+        try {
+          const response = await fetch(`${argocdUrl}/api/v1/session/userinfo`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+
+          if (!response.ok) {
+            throw new Error('Invalid token');
+          }
+
+          const userInfo = await response.json();
+
+          return {
+            token,
+            clientId: oauthClientId,
+            scopes: ['openid', 'email', 'profile', 'groups'],
+            metadata: {
+              username: userInfo.username,
+              email: userInfo.email,
+              groups: userInfo.groups
+            }
+          };
+        } catch (error) {
+          throw new Error('Token verification failed');
+        }
+      },
+      getClient: async (client_id) => {
+        if (client_id !== oauthClientId) {
+          throw new Error('Invalid client');
+        }
+
+        return {
+          client_id,
+          redirect_uris: [
+            `${mcpBaseUrl}/oauth/callback`,
+            'http://localhost:3000/oauth/callback'
+          ]
+        };
+      }
+    });
+
+    // Mount OAuth router
+    const authRouter = mcpAuthRouter({
+      provider: oauthProvider,
+      issuerUrl: new URL(argocdUrl),
+      baseUrl: new URL(mcpBaseUrl),
+      serviceDocumentationUrl: new URL(
+        'https://github.com/argoproj-labs/mcp-for-argocd'
+      )
+    });
+
+    app.use('/oauth', authRouter);
+
+    logger.info(`OAuth configured for ArgoCD: ${argocdUrl}`);
+  } else {
+    logger.info('OAuth not configured - missing required environment variables');
+  }
+
+  // Health endpoints
+  app.get('/health', (req, res) => {
+    res.status(200).json({
+      status: 'ok',
+      timestamp: Date.now()
+    });
+  });
+
+  app.get('/readiness', (req, res) => {
+    res.status(200).json({
+      status: 'ready',
+      oauth_enabled: !!(argocdUrl && oauthClientId && oauthClientSecret),
+      argocd_url: argocdUrl
+    });
+  });
+
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
   app.post('/mcp', async (req, res) => {
@@ -62,15 +154,42 @@ export const connectHttpTransport = (port: number) => {
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
-      const argocdBaseUrl =
-        (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
-      const argocdApiToken =
-        (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+      // Get token from three possible sources:
+      // 1. Authorization: Bearer <token> (OAuth)
+      // 2. x-argocd-api-token header (API token)
+      // 3. ARGOCD_API_TOKEN env var (fallback)
 
-      if (argocdBaseUrl == '' || argocdApiToken == '') {
-        res
-          .status(400)
-          .send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+      const authHeader = req.headers['authorization'] as string | undefined;
+      const bearerToken = authHeader?.startsWith('Bearer ')
+        ? authHeader.substring(7)
+        : undefined;
+
+      const argocdApiToken =
+        bearerToken ||
+        (req.headers['x-argocd-api-token'] as string) ||
+        process.env.ARGOCD_API_TOKEN ||
+        '';
+
+      if (!argocdApiToken) {
+        res.status(401).json({
+          error: 'authentication_required',
+          message: 'Authentication required. Use OAuth or provide x-argocd-api-token header.',
+          oauth_url: '/oauth/authorize'
+        });
+        return;
+      }
+
+      // Use URL from header if provided, otherwise from env
+      const argocdBaseUrl =
+        (req.headers['x-argocd-base-url'] as string) ||
+        process.env.ARGOCD_BASE_URL ||
+        '';
+
+      if (!argocdBaseUrl) {
+        res.status(400).json({
+          error: 'missing_argocd_url',
+          message: 'ARGOCD_BASE_URL not configured'
+        });
         return;
       }
 
@@ -93,6 +212,8 @@ export const connectHttpTransport = (port: number) => {
       });
 
       await server.connect(transport);
+
+      logger.info('Session initialized with token');
     } else {
       const errorMsg = sessionIdFromHeader
         ? `Invalid or expired session ID: ${sessionIdFromHeader}`
